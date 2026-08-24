@@ -39,6 +39,8 @@ model MockEndpoint {
   updatedAt    DateTime    @updatedAt
 
   project      Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
 }
 
 model RequestLog {
@@ -57,4 +59,6 @@ model RequestLog {
   createdAt        DateTime @default(now())
 
   project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
 }

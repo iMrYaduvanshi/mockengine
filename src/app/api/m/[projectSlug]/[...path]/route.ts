@@ -1,16 +1,38 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 
-// Helper: CORS Headers taaki koi bhi external frontend app is mock API ko call kar sake
+// Helper: Universal CORS Headers
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key",
 };
 
-// Browser ki pre-flight OPTIONS request handle karne ke liye
+// Browser pre-flight OPTIONS handler
 export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: corsHeaders });
+}
+
+// In-Memory Project Endpoint Cache (10-second TTL to eliminate repeated DB lookup latency)
+const projectCache: Record<string, { data: any; expiry: number }> = {};
+
+async function getProjectWithEndpoints(projectSlug: string) {
+  const now = Date.now();
+  const cached = projectCache[projectSlug];
+  if (cached && cached.expiry > now) {
+    return cached.data;
+  }
+
+  const project = await db.project.findUnique({
+    where: { slug: projectSlug },
+    include: { endpoints: true },
+  });
+
+  if (project) {
+    projectCache[projectSlug] = { data: project, expiry: now + 10000 }; // 10s cache
+  }
+
+  return project;
 }
 
 // Common Handler for all HTTP Methods (GET, POST, PUT, DELETE, PATCH)
@@ -18,19 +40,30 @@ async function handleMockRequest(
   req: NextRequest,
   { params }: { params: Promise<{ projectSlug: string; path: string[] }> }
 ) {
-  const startTime = Date.now();
   const { projectSlug, path } = await params;
   const method = req.method.toUpperCase();
-
-  // URL path ko string me convert karo (e.g. ["cart", "checkout"] -> "/cart/checkout")
   const requestedPath = "/" + (path ? path.join("/") : "");
 
+  // Capture client metadata for logging
+  const ip = req.headers.get("x-forwarded-for") || "127.0.0.1";
+  const userAgent = req.headers.get("user-agent") || "Unknown";
+  const headersObj: Record<string, string> = {};
+  req.headers.forEach((value, key) => {
+    headersObj[key] = value;
+  });
+
+  let bodyStr: string | null = null;
+  if (method !== "GET" && method !== "HEAD") {
+    try {
+      bodyStr = await req.clone().text();
+    } catch {
+      bodyStr = null;
+    }
+  }
+
   try {
-    // 1. Project find karo slug ke through
-    const project = await db.project.findUnique({
-      where: { slug: projectSlug },
-      include: { endpoints: true },
-    });
+    // 1. Fetch Project & Endpoints (with in-memory cache for sub-millisecond lookups)
+    const project = await getProjectWithEndpoints(projectSlug);
 
     if (!project) {
       return NextResponse.json(
@@ -42,17 +75,16 @@ async function handleMockRequest(
       );
     }
 
-    // 2. Matching Mock Endpoint dhoondo (Path aur HTTP Method dono match hone chahiye)
+    // 2. Match Mock Endpoint (Path + HTTP Method)
     const endpoint = project.endpoints.find(
-      (ep) =>
+      (ep: any) =>
         ep.path.toLowerCase() === requestedPath.toLowerCase() &&
         ep.method.toUpperCase() === method
     );
 
     if (!endpoint) {
-      // Agar endpoint nahi mila to user ko batao ki is project me kaunse endpoints available hain
       const availableEndpoints = project.endpoints.map(
-        (ep) => `${ep.method} ${ep.path}`
+        (ep: any) => `${ep.method} ${ep.path}`
       );
 
       return NextResponse.json(
@@ -65,7 +97,7 @@ async function handleMockRequest(
       );
     }
 
-    // 3. Agar endpoint disabled hai
+    // 3. If Endpoint is Disabled
     if (!endpoint.isActive) {
       return NextResponse.json(
         { error: "Endpoint Disabled", message: "This mock endpoint is currently disabled." },
@@ -73,28 +105,26 @@ async function handleMockRequest(
       );
     }
 
-    // 4. Chaos Feature: Latency Simulation (Artificial Delay)
+    // 4. Chaos Feature: Latency Simulation (Precise Artificial Delay)
     if (endpoint.delayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, endpoint.delayMs));
     }
 
-    // 5. Chaos Feature: Fault Injection (Random Error Rate)
+    // 5. Chaos Feature: Fault Injection (Random 500 Error Rate)
     if (endpoint.errorRate > 0 && Math.random() < endpoint.errorRate) {
-      const duration = Date.now() - startTime;
-      
-      // Request log record karo
-      await logRequest(project.id, endpoint.id, req, requestedPath, 500, duration);
+      // Background Non-Blocking Log (Fire & Forget)
+      saveLogBackground(project.id, endpoint.id, method, requestedPath, ip, userAgent, headersObj, bodyStr, 500, endpoint.delayMs);
 
       return NextResponse.json(
         {
           error: "Simulated Chaos Error",
-          message: `Triggered by MockEngine fault injection (Error rate: ${endpoint.errorRate * 100}%)`,
+          message: `Triggered by MockEngine fault injection (Error rate: ${Math.round(endpoint.errorRate * 100)}%)`,
         },
         { status: 500, headers: corsHeaders }
       );
     }
 
-    // 6. Response Body aur Custom Headers parse karo
+    // 6. Response Body and Custom Headers parsing
     let responseData = {};
     try {
       responseData = JSON.parse(endpoint.responseBody);
@@ -108,16 +138,25 @@ async function handleMockRequest(
         const parsedCustomHeaders = JSON.parse(endpoint.headers);
         customHeaders = { ...customHeaders, ...parsedCustomHeaders };
       } catch {
-        // Agar header json invalid hai to ignore karo
+        // ignore invalid JSON
       }
     }
 
-    const duration = Date.now() - startTime;
+    // 7. Background Non-Blocking Log (Fire & Forget - DOES NOT DELAY THE RESPONSE!)
+    saveLogBackground(
+      project.id,
+      endpoint.id,
+      method,
+      requestedPath,
+      ip,
+      userAgent,
+      headersObj,
+      bodyStr,
+      endpoint.statusCode,
+      endpoint.delayMs || 15
+    );
 
-    // 7. Request Log Database me save karo (Live Request Inspector ke liye)
-    await logRequest(project.id, endpoint.id, req, requestedPath, endpoint.statusCode, duration);
-
-    // 8. Custom JSON Response return karo
+    // 8. Send Immediate JSON Response
     return NextResponse.json(responseData, {
       status: endpoint.statusCode,
       headers: customHeaders,
@@ -131,39 +170,25 @@ async function handleMockRequest(
   }
 }
 
-// Helper function: Request details ko Database me log karna
-async function logRequest(
+// Background Fire-and-Forget Logger (Non-blocking)
+function saveLogBackground(
   projectId: string,
   endpointId: string | null,
-  req: NextRequest,
+  method: string,
   path: string,
+  ip: string,
+  userAgent: string,
+  headersObj: Record<string, string>,
+  bodyStr: string | null,
   status: number,
   duration: number
 ) {
-  try {
-    const ip = req.headers.get("x-forwarded-for") || "127.0.0.1";
-    const userAgent = req.headers.get("user-agent") || "Unknown";
-    
-    // Headers ko JSON object banana
-    const headersObj: Record<string, string> = {};
-    req.headers.forEach((value, key) => {
-      headersObj[key] = value;
-    });
-
-    let bodyStr: string | null = null;
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      try {
-        bodyStr = await req.text();
-      } catch {
-        bodyStr = null;
-      }
-    }
-
-    await db.requestLog.create({
+  db.requestLog
+    .create({
       data: {
         projectId,
         endpointId,
-        method: req.method.toUpperCase(),
+        method,
         path,
         ip,
         userAgent,
@@ -172,13 +197,13 @@ async function logRequest(
         responseStatus: status,
         responseDuration: duration,
       },
+    })
+    .catch((err) => {
+      console.error("Async log save failed:", err);
     });
-  } catch (err) {
-    console.error("Failed to save request log:", err);
-  }
 }
 
-// Saare HTTP Methods export karo
+// Export All HTTP Handlers
 export const GET = handleMockRequest;
 export const POST = handleMockRequest;
 export const PUT = handleMockRequest;
