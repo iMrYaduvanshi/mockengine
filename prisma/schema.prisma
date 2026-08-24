@@ -1,0 +1,60 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Project {
+  id          String         @id @default(cuid())
+  name        String
+  slug        String         @unique
+  description String?
+  apiKey      String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  endpoints   MockEndpoint[]
+  logs        RequestLog[]
+}
+
+model MockEndpoint {
+  id           String      @id @default(cuid())
+  projectId    String
+  name         String
+  path         String      // e.g. "/users" or "/products/list"
+  method       String      @default("GET") // GET, POST, PUT, DELETE, PATCH
+  statusCode   Int         @default(200)
+  responseBody String      @default("{}") // JSON string
+  headers      String?     @default("{}") // Custom response headers JSON
+  isActive     Boolean     @default(true)
+  
+  // Chaos & Network Simulation Features
+  delayMs      Int         @default(0)     // Artificial latency in ms (e.g. 500)
+  errorRate    Float       @default(0.0)   // 0.0 to 1.0 (e.g. 0.2 = 20% random 500 error)
+
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  project      Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model RequestLog {
+  id               String   @id @default(cuid())
+  projectId        String
+  endpointId       String?
+  method           String   // GET, POST, etc.
+  path             String   // The exact requested path
+  ip               String?
+  userAgent        String?
+  requestHeaders   String   @default("{}")
+  requestBody      String?
+  queryParams      String?  @default("{}")
+  responseStatus   Int      // Status code returned to the client
+  responseDuration Int      // Latency taken in milliseconds
+  createdAt        DateTime @default(now())
+
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
