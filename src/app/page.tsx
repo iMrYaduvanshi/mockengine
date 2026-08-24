@@ -255,7 +255,7 @@ export default function DashboardPage() {
               <span className="hidden sm:inline">Guide</span>
             </button>
             <a
-              href="https://github.com"
+              href="https://github.com/iMrYaduvanshi/mockengine"
               target="_blank"
               rel="noreferrer"
               className="text-xs font-medium text-zinc-200 hover:text-white flex items-center gap-1.5 bg-zinc-950 hover:bg-zinc-900 border border-zinc-750 px-3 py-1.5 rounded-lg transition"

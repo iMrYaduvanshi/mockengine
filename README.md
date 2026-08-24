@@ -75,7 +75,7 @@ In modern web and mobile development:
 
 ### 2. Clone and Install Dependencies
 ```bash
-git clone https://github.com/your-username/mockengine.git
+git clone https://github.com/iMrYaduvanshi/mockengine.git
 cd mockengine
 npm install
 ```
